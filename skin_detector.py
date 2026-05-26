@@ -16,9 +16,9 @@ class SkinDetector:
         # HSV thresholds (normalized S and V to 0-1 range)
         self.hsv_h_min = 0
         self.hsv_h_max = 50
-        self.hsv_s_min = 0.1
-        self.hsv_s_max = 0.4
-        self.hsv_v_min = 0.15
+        self.hsv_s_min = 0.08
+        self.hsv_s_max = 0.68
+        self.hsv_v_min = 0.20
         self.hsv_v_max = 1.0
         
         # RGB thresholds
@@ -75,10 +75,36 @@ class SkinDetector:
         # Additional constraints
         condition_rg = (r > g)
         condition_rb = (r > b)
+        condition_max_min = (np.maximum(np.maximum(r, g), b) - np.minimum(np.minimum(r, g), b)) > 15
+        condition_rg_diff = np.abs(r - g) > 15
         
         # Combine all conditions
-        mask = (condition_r & condition_g & condition_b & condition_rg & condition_rb).astype(np.uint8) * 255
+        mask = (
+            condition_r
+            & condition_g
+            & condition_b
+            & condition_rg
+            & condition_rb
+            & condition_max_min
+            & condition_rg_diff
+        ).astype(np.uint8) * 255
         
+        return mask
+    
+    def detect_normalized_rgb(self, image):
+        """Detect skin using normalized RGB ratios."""
+        b, g, r = cv2.split(image.astype(np.float32))
+        total = r + g + b + 1e-6
+        r_norm = r / total
+        g_norm = g / total
+        b_norm = b / total
+
+        condition_rn = (r_norm >= 0.35) & (r_norm <= 0.53)
+        condition_gn = (g_norm >= 0.28) & (g_norm <= 0.46)
+        condition_bn = (b_norm >= 0.15) & (b_norm <= 0.30)
+        condition_ratio = (r_norm > g_norm) & (r_norm > b_norm)
+
+        mask = (condition_rn & condition_gn & condition_bn & condition_ratio).astype(np.uint8) * 255
         return mask
     
     def detect_ycbcr(self, image):
@@ -97,24 +123,95 @@ class SkinDetector:
         
         return mask
     
+    def detect_lab(self, image):
+        """Detect skin using Lab color space conditions."""
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2Lab)
+        l, a, b = cv2.split(lab)
+
+        condition_l = (l >= 20) & (l <= 255)
+        condition_a = (a >= 133) & (a <= 168)
+        condition_b = (b >= 143) & (b <= 208)
+        
+        mask = (condition_l & condition_a & condition_b).astype(np.uint8) * 255
+        return mask
+
+    def detect_face_region(self, image):
+        """Detect the face region to restrict skin detection to the face area."""
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=4, minSize=(80, 80))
+
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        for (x, y, w, h) in faces:
+            pad_w = int(w * 0.08)
+            pad_h = int(h * 0.18)
+            x1 = max(0, x - pad_w)
+            y1 = max(0, y - pad_h)
+            x2 = min(image.shape[1], x + w + pad_w)
+            y2 = min(image.shape[0], y + h + pad_h)
+            mask[y1:y2, x1:x2] = 255
+
+        return mask
+    
+    def keep_largest_components(self, mask, max_components=2, min_area=1000):
+        """Keep the largest connected skin regions and discard small noise."""
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        if num_labels <= 1:
+            return mask
+
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        sorted_indices = np.argsort(areas)[::-1]
+        selected = sorted_indices[:max_components]
+
+        kept_mask = np.zeros_like(mask)
+        for idx in selected:
+            area = areas[idx]
+            if area >= min_area:
+                kept_mask[labels == idx + 1] = 255
+
+        return kept_mask
+
     def detect_combined(self, image):
         """
         Detect skin using combined conditions from multiple color spaces.
-        Uses AND operation to get the most conservative estimate.
+        Uses a majority vote and face-region masking to reduce false positives.
         """
         mask_hsv = self.detect_hsv(image)
         mask_rgb = self.detect_rgb(image)
         mask_ycbcr = self.detect_ycbcr(image)
-        
-        # Combine masks - use OR to be more inclusive
-        combined_mask = cv2.bitwise_or(mask_hsv, cv2.bitwise_or(mask_rgb, mask_ycbcr))
-        
-        return combined_mask, mask_hsv, mask_rgb, mask_ycbcr
+        mask_lab = self.detect_lab(image)
+        mask_rgb_norm = self.detect_normalized_rgb(image)
+
+        # Broad union mask for diagnostics and fallback
+        combined_mask = cv2.bitwise_or(
+            mask_ycbcr,
+            cv2.bitwise_or(
+                mask_rgb,
+                cv2.bitwise_or(mask_hsv, cv2.bitwise_or(mask_lab, mask_rgb_norm)),
+            ),
+        )
+
+        # Majority voting across multiple color spaces
+        votes = (
+            (mask_hsv > 0).astype(np.uint8)
+            + (mask_rgb > 0).astype(np.uint8)
+            + (mask_ycbcr > 0).astype(np.uint8)
+            + (mask_lab > 0).astype(np.uint8)
+            + (mask_rgb_norm > 0).astype(np.uint8)
+        )
+        refined_mask = ((votes >= 2).astype(np.uint8) * 255)
+
+        # Restrict to face region when detected
+        face_region = self.detect_face_region(image)
+        if face_region.sum() > 0:
+            refined_mask = cv2.bitwise_and(refined_mask, face_region)
+
+        return combined_mask, refined_mask, mask_hsv, mask_rgb, mask_ycbcr
     
-    def postprocess_mask(self, mask, kernel_size=5, iterations=2):
+    def postprocess_mask(self, mask, kernel_size=7, iterations=2):
         """
         Apply morphological operations to clean up the mask.
-        Removes noise and fills small holes.
+        Removes noise and fills small holes, then keeps the largest connected regions.
         """
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
         
@@ -124,7 +221,10 @@ class SkinDetector:
         # Opening: remove small noise
         opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=iterations)
         
-        return opened
+        # Keep only the largest regions to remove stray false positives
+        filtered = self.keep_largest_components(opened, max_components=2, min_area=800)
+        
+        return filtered
     
     def extract_skin(self, image, mask):
         """
@@ -159,23 +259,24 @@ class SkinDetector:
         image_name = Path(image_path).stem
         
         # Detect skin using combined method
-        combined_mask, mask_hsv, mask_rgb, mask_ycbcr = self.detect_combined(image)
+        combined_mask, refined_mask, mask_hsv, mask_rgb, mask_ycbcr = self.detect_combined(image)
         
         # Apply postprocessing if requested
         if use_postprocessing:
-            combined_mask_clean = self.postprocess_mask(combined_mask)
+            refined_mask_clean = self.postprocess_mask(refined_mask)
         else:
-            combined_mask_clean = combined_mask
+            refined_mask_clean = refined_mask
         
         # Extract skin regions
-        skin_extracted = self.extract_skin(image, combined_mask_clean)
+        skin_extracted = self.extract_skin(image, refined_mask_clean)
         
         # Save outputs
         cv2.imwrite(str(output_path / f"{image_name}_mask_hsv.png"), mask_hsv)
         cv2.imwrite(str(output_path / f"{image_name}_mask_rgb.png"), mask_rgb)
         cv2.imwrite(str(output_path / f"{image_name}_mask_ycbcr.png"), mask_ycbcr)
         cv2.imwrite(str(output_path / f"{image_name}_mask_combined.png"), combined_mask)
-        cv2.imwrite(str(output_path / f"{image_name}_mask_clean.png"), combined_mask_clean)
+        cv2.imwrite(str(output_path / f"{image_name}_mask_refined.png"), refined_mask)
+        cv2.imwrite(str(output_path / f"{image_name}_mask_clean.png"), refined_mask_clean)
         cv2.imwrite(str(output_path / f"{image_name}_skin_extracted.png"), skin_extracted)
         
         print(f"\n✓ Processed: {image_path}")
@@ -192,7 +293,8 @@ class SkinDetector:
             'mask_rgb': mask_rgb,
             'mask_ycbcr': mask_ycbcr,
             'mask_combined': combined_mask,
-            'mask_clean': combined_mask_clean,
+            'mask_refined': refined_mask,
+            'mask_clean': refined_mask_clean,
             'skin_extracted': skin_extracted
         }
     
