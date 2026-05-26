@@ -1,0 +1,16 @@
+.git/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.DS_Store
+.venv/
+venv/
+output/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
