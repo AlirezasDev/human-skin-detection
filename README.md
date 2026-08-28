@@ -1,131 +1,171 @@
 # Human Skin Detection
 
-A comprehensive skin detection system using multiple color spaces (HSV, RGB, YCbCr) to identify and extract human skin regions from images.
+A comprehensive skin detection system using multiple color spaces (RGB, HSV, YCbCr) to identify and extract human skin regions from images. Based on the research paper "Human Skin Detection Using RGB, HSV and YCbCr Color Models" by Kolkur et al.
 
 ## Features
 
-- **Multi-color space analysis**: Combines HSV, RGB, and YCbCr color spaces for robust skin detection
-- **Morphological cleaning**: Applies erosion and dilation to remove noise and fill holes
-- **Batch processing**: Process multiple images at once
-- **Individual masks**: See results from each color space separately
-- **Normalized HSV**: Properly normalizes S and V channels to 0-1 range as specified in research literature
+- **Multi-color space analysis**: Combines RGB, HSV, and YCbCr for robust detection
+- **Modular architecture**: Clean separation of config, detectors, processing, and utilities
+- **Configurable thresholds**: Easy customization via frozen dataclasses
+- **Batch processing**: Process entire directories of images
+- **Multiple outputs**: Individual masks, combined mask, cleaned mask, and extracted skin
 
 ## Color Space Conditions
 
-### HSV Color Space
-- **Hue (H)**: 0 to 50 degrees
-- **Saturation (S)**: 0.1 to 0.4 (normalized to 0-1 range)
-- **Value (V)**: 0.15 to 1.0 (normalized to 0-1 range)
+### RGB Color Space
 
-**Normalization**:
+| Channel | Condition |
+|---------|-----------|
+| R | > 95 |
+| G | > 40 |
+| B | > 20 |
+| Constraint | R > G |
+| Constraint | R > B |
+| Constraint | \|R - G\| > 15 |
+
+### HSV Color Space
+
+| Channel | Condition |
+|---------|-----------|
+| H (Hue) | 0.0 to 50.0 |
+| S (Saturation) | 0.23 to 0.68 (normalized to 0-1) |
+
+**Note**: S and V channels are normalized before applying thresholds:
+
 ```
 S = S / 255
 V = V / 255
 ```
 
-### RGB Color Space
-- **Red (R)**: > 95
-- **Green (G)**: > 40
-- **Blue (B)**: > 20
-- **Constraints**: R > G and R > B
-
 ### YCbCr Color Space
-- **Cb**: 77 to 127
-- **Cr**: 133 to 173
+
+| Channel | Condition |
+|---------|-----------|
+| Y (Luminance) | > 80 |
+| Cb (Blue Chrominance) | > 85 |
+| Cr (Red Chrominance) | > 135 |
+
+**Linear constraints**:
+
+- Cr ≤ 1.5862 × Cb + 20
+- Cr ≥ 0.3448 × Cb + 76.2069
+- Cr ≥ -4.5652 × Cb + 234.5652
+- Cr ≤ -1.15 × Cb + 301.75
+- Cr ≤ -2.2857 × Cb + 432.85
 
 ## Installation
 
 ```bash
+git clone https://github.com/AlirezasDev/human-skin-detection.git
+cd human-skin-detection
 pip install -r requirements.txt
 ```
 
 ## Usage
 
-### Single Image Processing
+### Single Image
 
 ```bash
-python skin_detector.py path/to/image.jpg
+python main.py photo.jpg
 ```
 
-This generates the following outputs in the `output/` directory:
-- `image_mask_hsv.png` - Mask from HSV detection
-- `image_mask_rgb.png` - Mask from RGB detection
-- `image_mask_ycbcr.png` - Mask from YCbCr detection
-- `image_mask_combined.png` - Combined mask (OR of all three)
-- `image_mask_clean.png` - Combined mask with morphological cleaning
-- `image_skin_extracted.png` - Original image with only skin regions visible
+### Single Image with Custom Output
+
+```bash
+python main.py photo.jpg results/
+```
 
 ### Batch Processing
 
 ```bash
-python skin_detector.py --batch path/to/images/
+python main.py --batch ./images/
 ```
 
-Processes all images in the directory and saves results to `output/`.
+### Batch Processing with Custom Output
 
-## Output Descriptions
+```bash
+python main.py --batch ./images/ results/
+```
 
-| Output | Description |
-|--------|-------------|
-| `mask_hsv.png` | Binary mask from HSV color space analysis |
-| `mask_rgb.png` | Binary mask from RGB color space analysis |
-| `mask_ycbcr.png` | Binary mask from YCbCr color space analysis |
-| `mask_combined.png` | Union (OR) of all three masks before cleaning |
-| `mask_clean.png` | Combined mask after morphological operations |
-| `skin_extracted.png` | Original image with only detected skin regions |
+## Output Files
 
-## Algorithm Overview
+| File | Description |
+|------|-------------|
+| `*_mask_rgb.png` | Binary mask from RGB detection |
+| `*_mask_hsv.png` | Binary mask from HSV detection |
+| `*_mask_ycbcr.png` | Binary mask from YCbCr detection |
+| `*_mask_combined.png` | Union of all three masks |
+| `*_mask_clean.png` | Combined mask after morphological cleaning |
+| `*_skin_extracted.png` | Original image with only skin regions |
+| `*_skin_black_bg.png` | Skin regions on black background |
 
-1. **Color Space Conversion**: Convert input image to HSV, RGB, and YCbCr
-2. **Channel Normalization**: Normalize HSV S and V channels to 0-1 range
-3. **Condition Checking**: Apply threshold conditions for each color space
-4. **Mask Combination**: Combine masks using OR operation
-5. **Morphological Cleaning**: Apply close and open operations to remove noise
-6. **Skin Extraction**: Apply mask to original image to extract skin regions
-
-## Example
+## Programmatic Usage
 
 ```python
 from skin_detector import SkinDetector
 
-# Create detector instance
 detector = SkinDetector()
+results = detector.process_image("photo.jpg", output_dir="output")
 
-# Process a single image
-results = detector.process_image('photo.jpg', output_dir='output')
-
-# Access results
-original = results['original']
-skin_mask = results['mask_clean']
-extracted = results['skin_extracted']
+original = results["original"]
+skin_mask = results["mask_clean"]
+extracted = results["skin_extracted"]
 ```
 
-## Dependencies
+### Custom Configuration
 
-- **OpenCV**: Image processing
-- **NumPy**: Numerical operations
-- **Matplotlib**: Visualization
-- **SciPy**: Scientific computing
+```python
+from skin_detector import SkinDetector
+from config import SkinDetectionConfig, RGBThresholds, HSVThresholds
+
+custom_config = SkinDetectionConfig(
+    rgb=RGBThresholds(r_min=100, g_min=50, b_min=30),
+    hsv=HSVThresholds(h_min=0, h_max=45, s_min=0.2, s_max=0.7),
+)
+detector = SkinDetector(config=custom_config)
+results = detector.process_image("photo.jpg")
+```
+
+## Project Structure
+
+```
+human-skin-detection/
+├── config.py           # Threshold configuration dataclasses
+├── detectors.py        # RGB, HSV, YCbCr detector implementations
+├── processing.py       # Morphological operations and skin extraction
+├── utils.py            # I/O utility functions
+├── skin_detector.py    # Main SkinDetector class
+├── main.py             # CLI entry point
+├── example_usage.py    # Usage examples
+├── requirements.txt    # Python dependencies
+├── README.md           # This file
+└── .gitignore          # Git ignore rules
+```
+
+## Algorithm Overview
+
+1. **Load Image**: Read input image in BGR format
+2. **Color Space Conversion**: Convert to RGB, HSV, and YCbCr
+3. **Apply Thresholds**: Check each pixel against paper conditions
+4. **Combine Masks**: Union of all three color space masks
+5. **Morphological Cleaning**: Close holes, remove noise, keep largest regions
+6. **Extract Skin**: Apply cleaned mask to original image
 
 ## Research Basis
 
-This implementation is based on established skin detection techniques that leverage multiple color spaces:
-- HSV-based conditions for hue and saturation filtering
-- RGB-based constraints for typical skin color ranges
-- YCbCr-based chrominance analysis
+This implementation is based on the paper:
+
+> Kolkur, S., Kalbande, D., Shimpi, P., Bapat, C., & Jatakia, J. (2017).
+> Human Skin Detection Using RGB, HSV and YCbCr Color Models.
+> *Advances in Intelligent Systems Research*, Vol. 137, pp. 324-332.
+
+The algorithm achieves precision of 89.33% and accuracy of 94.43% on the Pratheepan dataset.
 
 ## Limitations
 
-- Best results with frontal lighting
+- Best results with frontal lighting conditions
 - May detect non-skin regions with similar color profiles
-- Performance varies with image quality and lighting conditions
-
-## Future Improvements
-
-- Adaptive thresholds based on image lighting
-- Machine learning-based refinement
-- Real-time video processing
-- GPU acceleration
+- Performance varies with image quality and lighting
 
 ## License
 
